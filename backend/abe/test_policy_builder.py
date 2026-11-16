@@ -1,3 +1,4 @@
+
 import unittest
 
 from policy_builder import CpAbePolicyBuilder
@@ -11,30 +12,42 @@ class TestPolicyBuilderEvaluation(unittest.TestCase):
     def test_and_only(self):
         """Test AND operator."""
         self.assertTrue(
-            self.builder.evaluate_user_attributes({'a', 'b'}, 'a AND b')
+            self.builder.evaluate_user_attributes(
+                {'a', 'b'}, 'a AND b'
+            )
         )
         self.assertFalse(
-            self.builder.evaluate_user_attributes({'a'}, 'a AND b')
+            self.builder.evaluate_user_attributes(
+                {'a'}, 'a AND b'
+            )
         )
 
     def test_or_only(self):
         """Test OR operator."""
         self.assertTrue(
-            self.builder.evaluate_user_attributes({'a'}, 'a OR b')
+            self.builder.evaluate_user_attributes(
+                {'a'}, 'a OR b'
+            )
         )
         self.assertFalse(
-            self.builder.evaluate_user_attributes(set(), 'a OR b')
+            self.builder.evaluate_user_attributes(
+                set(), 'a OR b'
+            )
         )
 
     def test_mixed_or_branch_not_truncated(self):
-        """Ensure OR branches are evaluated completely."""
+        """Test complete evaluation of OR branches."""
         policy = 'role:driver AND cleared:true OR admin:true'
 
         self.assertTrue(
-            self.builder.evaluate_user_attributes({'admin:true'}, policy)
+            self.builder.evaluate_user_attributes(
+                {'admin:true'}, policy
+            )
         )
         self.assertFalse(
-            self.builder.evaluate_user_attributes({'role:driver'}, policy)
+            self.builder.evaluate_user_attributes(
+                {'role:driver'}, policy
+            )
         )
 
     def test_parenthesized_group(self):
@@ -42,21 +55,29 @@ class TestPolicyBuilderEvaluation(unittest.TestCase):
         policy = '(a AND b) OR (c AND d)'
 
         self.assertTrue(
-            self.builder.evaluate_user_attributes({'c', 'd'}, policy)
+            self.builder.evaluate_user_attributes(
+                {'c', 'd'}, policy
+            )
         )
         self.assertFalse(
-            self.builder.evaluate_user_attributes({'a'}, policy)
+            self.builder.evaluate_user_attributes(
+                {'a'}, policy
+            )
         )
 
     def test_exact_attribute_matching_preserves_parens(self):
-        """Ensure parentheses inside attributes are preserved."""
+        """Test parentheses inside attribute names."""
         policy = 'dept:(eng)'
 
         self.assertTrue(
-            self.builder.evaluate_user_attributes({'dept:(eng)'}, policy)
+            self.builder.evaluate_user_attributes(
+                {'dept:(eng)'}, policy
+            )
         )
         self.assertFalse(
-            self.builder.evaluate_user_attributes({'dept:eng'}, policy)
+            self.builder.evaluate_user_attributes(
+                {'dept:eng'}, policy
+            )
         )
 
     def test_not_operator(self):
@@ -64,14 +85,18 @@ class TestPolicyBuilderEvaluation(unittest.TestCase):
         policy = 'NOT banned:true'
 
         self.assertTrue(
-            self.builder.evaluate_user_attributes(set(), policy)
+            self.builder.evaluate_user_attributes(
+                set(), policy
+            )
         )
         self.assertFalse(
-            self.builder.evaluate_user_attributes({'banned:true'}, policy)
+            self.builder.evaluate_user_attributes(
+                {'banned:true'}, policy
+            )
         )
 
     def test_build_trip_document_policy(self):
-        """Test generated trip document access policy."""
+        """Test generated trip document policy."""
         policy = self.builder.build_trip_document_policy('T1')
 
         self.assertTrue(
@@ -93,32 +118,57 @@ class TestPolicyBuilderEvaluation(unittest.TestCase):
         )
 
     def test_empty_user_attributes(self):
-        """Test evaluation with empty user attributes."""
+        """Test empty user attributes."""
         self.assertFalse(
-            self.builder.evaluate_user_attributes(set(), 'a AND b')
+            self.builder.evaluate_user_attributes(
+                set(), 'a AND b'
+            )
         )
 
     def test_multiple_or_branches(self):
-        """Test policies containing multiple OR branches."""
+        """Test multiple OR branches."""
         policy = 'a AND b OR c AND d OR e'
 
         self.assertTrue(
-            self.builder.evaluate_user_attributes({'e'}, policy)
+            self.builder.evaluate_user_attributes(
+                {'e'}, policy
+            )
         )
         self.assertTrue(
-            self.builder.evaluate_user_attributes({'c', 'd'}, policy)
+            self.builder.evaluate_user_attributes(
+                {'c', 'd'}, policy
+            )
         )
         self.assertFalse(
-            self.builder.evaluate_user_attributes({'c'}, policy)
+            self.builder.evaluate_user_attributes(
+                {'c'}, policy
+            )
         )
 
     def test_case_sensitive_attributes(self):
-        """Test exact attribute matching."""
+        """Test exact case-sensitive matching."""
         self.assertTrue(
-            self.builder.evaluate_user_attributes({'Role: Admin'}, 'Role: Admin')
+            self.builder.evaluate_user_attributes(
+                {'Role: Admin'}, 'Role: Admin'
+            )
         )
         self.assertFalse(
-            self.builder.evaluate_user_attributes({'role: admin'}, 'Role: Admin')
+            self.builder.evaluate_user_attributes(
+                {'role: admin'}, 'Role: Admin'
+            )
+        )
+
+    def test_single_attribute(self):
+        """Test a policy with one attribute."""
+        self.assertTrue(
+            self.builder.evaluate_user_attributes(
+                {'admin'}, 'admin'
+            )
+        )
+        self.assertFalse(
+            self.builder.evaluate_user_attributes(
+                {'user'}, 'admin'
+            )
         )
 
 
