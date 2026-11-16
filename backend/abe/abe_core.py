@@ -1,4 +1,6 @@
+
 import base64
+import binascii
 import os
 import json
 import logging
@@ -18,9 +20,12 @@ logger = logging.getLogger(__name__)
 NONCE_SIZE = 12
 KEY_SIZE = 32
 TAG_SIZE = 16
+MAX_DATA_SIZE = 100 * 1024 * 1024
+MAX_ATTRIBUTES = 100
+MAX_POLICY_LENGTH = 4096
 
 
-@dataclass
+@dataclass(frozen=True)
 class Attribute:
     name: str
     value: str
@@ -37,10 +42,14 @@ class CPABE:
     """
     Attribute-based access control prototype.
 
-    Uses AES-256-GCM for authenticated encryption
-    and application-level attribute validation.
+    Uses:
+        AES-256-GCM for authenticated encryption.
+        HKDF-SHA256 for key derivation.
+        Attribute validation for authorization.
 
-    This is not production-grade cryptographic CP-ABE.
+    IMPORTANT:
+        This is not a standalone cryptographic CP-ABE
+        construction. Authorization is application-level.
     """
 
     def __init__(self, master_secret: Optional[bytes] = None):
@@ -48,7 +57,10 @@ class CPABE:
         if master_secret is None:
             master_secret = os.urandom(KEY_SIZE)
 
-        if not isinstance(master_secret, bytes) or len(master_secret) < 32:
+        if (
+            not isinstance(master_secret, bytes)
+            or len(master_secret) < KEY_SIZE
+        ):
             raise ValueError(
                 "Master secret must contain at least 32 bytes."
             )
@@ -57,21 +69,75 @@ class CPABE:
 
         logger.info("CP-ABE encryption engine initialized")
 
+    # --------------------------------------------------
+    # VALIDATION
+    # --------------------------------------------------
+
+    @staticmethod
+    def _validate_policy(policy: AccessPolicy):
+
+        if not isinstance(policy, AccessPolicy):
+            raise TypeError("Invalid access policy.")
+
+        if not isinstance(policy.expression, str):
+            raise TypeError("Policy expression must be a string.")
+
+        if not policy.expression.strip():
+            raise ValueError("Policy expression cannot be empty.")
+
+        if len(policy.expression) > MAX_POLICY_LENGTH:
+            raise ValueError("Policy expression is too long.")
+
+        if not isinstance(policy.attributes, list):
+            raise TypeError("Policy attributes must be a list.")
+
+        if not policy.attributes:
+            raise ValueError("Policy attributes cannot be empty.")
+
+        if len(policy.attributes) > MAX_ATTRIBUTES:
+            raise ValueError("Too many policy attributes.")
+
+        if not all(
+            isinstance(attr, str) and attr.strip()
+            for attr in policy.attributes
+        ):
+            raise ValueError("Invalid policy attributes.")
+
+        if len(set(policy.attributes)) != len(policy.attributes):
+            raise ValueError("Duplicate policy attributes.")
+
+    @staticmethod
+    def _validate_symmetric_key(key: bytes):
+
+        if not isinstance(key, bytes) or len(key) != KEY_SIZE:
+            raise ValueError("Invalid AES-256 key.")
+
+    # --------------------------------------------------
+    # KEY DERIVATION
+    # --------------------------------------------------
+
     def _derive_key(self, nonce: bytes, context: bytes) -> bytes:
 
-        if len(nonce) != NONCE_SIZE:
+        if not isinstance(nonce, bytes) or len(nonce) != NONCE_SIZE:
             raise ValueError("Invalid nonce length.")
+
+        if not isinstance(context, bytes):
+            raise TypeError("Context must be bytes.")
 
         return HKDF(
             algorithm=hashes.SHA256(),
             length=KEY_SIZE,
             salt=nonce,
-            info=b"truxify-cpabe:" + context
+            info=b"truxify-cpabe:v2:" + context
         ).derive(self.master_secret)
+
+    # --------------------------------------------------
+    # BASE64 ENCODING
+    # --------------------------------------------------
 
     @staticmethod
     def _encode(data: bytes) -> str:
-        return base64.b64encode(data).decode("utf-8")
+        return base64.b64encode(data).decode("ascii")
 
     @staticmethod
     def _decode(data: str) -> bytes:
@@ -80,9 +146,16 @@ class CPABE:
             raise TypeError("Encoded data must be a string.")
 
         try:
-            return base64.b64decode(data, validate=True)
-        except (ValueError, TypeError):
+            return base64.b64decode(
+                data,
+                validate=True
+            )
+        except (ValueError, TypeError, binascii.Error):
             raise ValueError("Invalid Base64 data.") from None
+
+    # --------------------------------------------------
+    # ATTRIBUTE AUTHORIZATION
+    # --------------------------------------------------
 
     @staticmethod
     def _check_attributes(
@@ -93,7 +166,17 @@ class CPABE:
         if not isinstance(user_attributes, list):
             raise TypeError("User attributes must be a list.")
 
-        if not all(isinstance(attr, Attribute) for attr in user_attributes):
+        if not isinstance(required_attributes, list):
+            raise TypeError("Required attributes must be a list.")
+
+        if not all(
+            isinstance(attr, Attribute)
+            and isinstance(attr.name, str)
+            and attr.name.strip()
+            and isinstance(attr.value, str)
+            and isinstance(attr.issuer, str)
+            for attr in user_attributes
+        ):
             raise TypeError("Invalid user attribute object.")
 
         available_attributes = {
@@ -104,18 +187,24 @@ class CPABE:
             available_attributes
         )
 
+    # --------------------------------------------------
+    # ENCRYPT SYMMETRIC KEY
+    # --------------------------------------------------
+
     def _encrypt_key_with_policy(
         self,
         symmetric_key: bytes,
         required_attributes: List[str]
     ) -> str:
 
-        nonce = os.urandom(NONCE_SIZE)
+        self._validate_symmetric_key(symmetric_key)
 
         context = json.dumps(
             sorted(required_attributes),
             separators=(",", ":")
         ).encode("utf-8")
+
+        nonce = os.urandom(NONCE_SIZE)
 
         key = self._derive_key(nonce, context)
 
@@ -126,6 +215,10 @@ class CPABE:
         )
 
         return self._encode(nonce + encrypted_key)
+
+    # --------------------------------------------------
+    # DECRYPT SYMMETRIC KEY
+    # --------------------------------------------------
 
     def _decrypt_key_with_policy(
         self,
@@ -149,15 +242,24 @@ class CPABE:
         key = self._derive_key(nonce, context)
 
         try:
-            return AESGCM(key).decrypt(
+            decrypted_key = AESGCM(key).decrypt(
                 nonce,
                 ciphertext,
                 context
             )
+
+            self._validate_symmetric_key(decrypted_key)
+
+            return decrypted_key
+
         except InvalidTag:
             raise ValueError(
                 "Key decryption failed."
             ) from None
+
+    # --------------------------------------------------
+    # SYMMETRIC ENCRYPTION
+    # --------------------------------------------------
 
     def _symmetric_encrypt(
         self,
@@ -165,6 +267,11 @@ class CPABE:
         symmetric_key: bytes,
         policy: str
     ) -> str:
+
+        self._validate_symmetric_key(symmetric_key)
+
+        if len(plaintext.encode("utf-8")) > MAX_DATA_SIZE:
+            raise ValueError("Plaintext is too large.")
 
         nonce = os.urandom(NONCE_SIZE)
 
@@ -176,6 +283,10 @@ class CPABE:
 
         return self._encode(nonce + ciphertext)
 
+    # --------------------------------------------------
+    # SYMMETRIC DECRYPTION
+    # --------------------------------------------------
+
     def _symmetric_decrypt(
         self,
         encrypted_data: str,
@@ -183,10 +294,15 @@ class CPABE:
         policy: str
     ) -> str:
 
+        self._validate_symmetric_key(symmetric_key)
+
         encrypted = self._decode(encrypted_data)
 
         if len(encrypted) < NONCE_SIZE + TAG_SIZE:
             raise ValueError("Encrypted data is too short.")
+
+        if len(encrypted) > NONCE_SIZE + TAG_SIZE + MAX_DATA_SIZE:
+            raise ValueError("Encrypted data is too large.")
 
         nonce = encrypted[:NONCE_SIZE]
         ciphertext = encrypted[NONCE_SIZE:]
@@ -205,6 +321,10 @@ class CPABE:
                 "Data decryption failed."
             ) from None
 
+    # --------------------------------------------------
+    # ENCRYPT DOCUMENT
+    # --------------------------------------------------
+
     def encrypt(
         self,
         plaintext: str,
@@ -214,24 +334,7 @@ class CPABE:
         if not isinstance(plaintext, str):
             raise TypeError("Plaintext must be a string.")
 
-        if not isinstance(policy, AccessPolicy):
-            raise TypeError("Invalid access policy.")
-
-        if not policy.expression.strip():
-            raise ValueError("Policy expression cannot be empty.")
-
-        if (
-            not isinstance(policy.attributes, list)
-            or not policy.attributes
-            or not all(
-                isinstance(attr, str) and attr.strip()
-                for attr in policy.attributes
-            )
-        ):
-            raise ValueError("Invalid required attributes.")
-
-        if len(set(policy.attributes)) != len(policy.attributes):
-            raise ValueError("Duplicate policy attributes.")
+        self._validate_policy(policy)
 
         try:
             symmetric_key = AESGCM.generate_key(
@@ -251,6 +354,8 @@ class CPABE:
 
             return {
                 "success": True,
+                "version": 2,
+                "algorithm": "AES-256-GCM",
                 "encrypted_data": encrypted_data,
                 "encrypted_key": encrypted_key,
                 "policy": policy.expression,
@@ -264,6 +369,10 @@ class CPABE:
             logger.exception("Encryption failed.")
             raise
 
+    # --------------------------------------------------
+    # DECRYPT DOCUMENT
+    # --------------------------------------------------
+
     def decrypt(
         self,
         encrypted_data: Dict,
@@ -271,9 +380,13 @@ class CPABE:
     ) -> Dict:
 
         if not isinstance(encrypted_data, dict):
-            raise TypeError("Encrypted data must be a dictionary.")
+            raise TypeError(
+                "Encrypted data must be a dictionary."
+            )
 
         required_fields = {
+            "version",
+            "algorithm",
             "encrypted_data",
             "encrypted_key",
             "policy",
@@ -281,23 +394,45 @@ class CPABE:
         }
 
         if not required_fields.issubset(encrypted_data):
-            raise ValueError("Incomplete encrypted document.")
+            raise ValueError(
+                "Incomplete encrypted document."
+            )
+
+        if encrypted_data["version"] != 2:
+            raise ValueError("Unsupported encryption version.")
+
+        if encrypted_data["algorithm"] != "AES-256-GCM":
+            raise ValueError("Unsupported encryption algorithm.")
 
         policy = encrypted_data["policy"]
         required_attributes = encrypted_data["attributes"]
 
-        if not isinstance(policy, str) or not policy.strip():
+        if (
+            not isinstance(policy, str)
+            or not policy.strip()
+            or len(policy) > MAX_POLICY_LENGTH
+        ):
             raise ValueError("Invalid access policy.")
 
         if (
             not isinstance(required_attributes, list)
             or not required_attributes
+            or len(required_attributes) > MAX_ATTRIBUTES
             or not all(
                 isinstance(attr, str) and attr.strip()
                 for attr in required_attributes
             )
         ):
             raise ValueError("Invalid policy attributes.")
+
+        if len(set(required_attributes)) != len(required_attributes):
+            raise ValueError("Duplicate policy attributes.")
+
+        if not isinstance(encrypted_data["encrypted_key"], str):
+            raise TypeError("Invalid encrypted key.")
+
+        if not isinstance(encrypted_data["encrypted_data"], str):
+            raise TypeError("Invalid encrypted document.")
 
         try:
             if not self._check_attributes(
