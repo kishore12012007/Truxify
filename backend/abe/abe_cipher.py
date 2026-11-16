@@ -36,15 +36,11 @@ class CpAbeCipherEngine:
     """
     Policy-gated document encryption engine.
 
-    Uses:
-        AES-256-GCM for authenticated encryption.
-        HKDF-SHA256 for per-document key derivation.
-        PolicyBuilder for attribute authorization.
+    Uses AES-256-GCM for authenticated encryption.
+    Uses HKDF-SHA256 for key derivation.
+    Uses PolicyBuilder for attribute authorization.
 
-    IMPORTANT:
-        This implementation is not a standalone CP-ABE
-        cryptographic construction. Attribute-based access
-        is enforced by the policy authorization layer.
+    This is not a standalone CP-ABE construction.
     """
 
     def __init__(self, policy_builder=None):
@@ -105,9 +101,7 @@ class CpAbeCipherEngine:
     ) -> Set[str]:
 
         if not isinstance(user_attributes, set):
-            raise TypeError(
-                "User attributes must be a set."
-            )
+            raise TypeError("User attributes must be a set.")
 
         if not all(
             isinstance(attr, str) and attr.strip()
@@ -124,41 +118,24 @@ class CpAbeCipherEngine:
     # --------------------------------------------------
 
     def _get_master_secret(self, key_id: str) -> bytes:
-        """
-        Retrieves a master secret using a key identifier.
-
-        Environment variables:
-            ABE_MASTER_SECRET_DEFAULT
-            ABE_MASTER_SECRET_PRODUCTION
-            ABE_MASTER_SECRET_BACKUP
-
-        Falls back to ABE_MASTER_SECRET for the default
-        key ID to preserve existing deployments.
-        """
 
         env_name = f"ABE_MASTER_SECRET_{key_id.upper()}"
 
         master_secret = os.environ.get(env_name)
 
         if not master_secret and key_id == DEFAULT_KEY_ID:
-            master_secret = os.environ.get(
-                "ABE_MASTER_SECRET"
-            )
+            master_secret = os.environ.get("ABE_MASTER_SECRET")
 
         if not master_secret:
             raise RuntimeError(
-                f"Master encryption key '{key_id}' "
-                "is not configured."
+                f"Master encryption key '{key_id}' is not configured."
             )
 
         secret_bytes = master_secret.encode("utf-8")
 
-        # Minimum input length. Use a randomly generated
-        # secret with at least 32 bytes of entropy.
         if len(secret_bytes) < KEY_SIZE:
             raise RuntimeError(
-                "Master secret must contain at least "
-                "32 bytes."
+                "Master secret must contain at least 32 bytes."
             )
 
         return secret_bytes
@@ -173,12 +150,6 @@ class CpAbeCipherEngine:
         key_id: str,
         document_id: Optional[str],
     ) -> bytes:
-        """
-        Binds encryption metadata to the ciphertext.
-
-        Changing the policy, key ID, document ID, or
-        envelope version invalidates authentication.
-        """
 
         metadata = {
             "version": ENVELOPE_VERSION,
@@ -206,8 +177,8 @@ class CpAbeCipherEngine:
         key_id: str = DEFAULT_KEY_ID,
     ) -> bytes:
 
-        if len(nonce) != NONCE_SIZE:
-            raise ValueError("Invalid nonce length.")
+        if not isinstance(nonce, bytes) or len(nonce) != NONCE_SIZE:
+            raise ValueError("Invalid nonce.")
 
         master_secret = self._get_master_secret(key_id)
 
@@ -234,34 +205,23 @@ class CpAbeCipherEngine:
     ) -> Dict:
 
         if not isinstance(plaintext_bytes, bytes):
-            raise TypeError(
-                "Plaintext must be bytes."
-            )
+            raise TypeError("Plaintext must be bytes.")
 
         policy_str = self._validate_policy(policy_str)
-
-        document_id = self._validate_document_id(
-            document_id
-        )
-
+        document_id = self._validate_document_id(document_id)
         key_id = self._validate_key_id(key_id)
 
         if len(plaintext_bytes) > MAX_CIPHERTEXT_SIZE:
-            raise ValueError(
-                "Document exceeds maximum encryption size."
-            )
+            raise ValueError("Document exceeds maximum encryption size.")
 
-        # Fresh cryptographically secure nonce.
         nonce = os.urandom(NONCE_SIZE)
 
-        # Derive an independent document encryption key.
         key = self._derive_key(
             policy_str,
             nonce,
             key_id,
         )
 
-        # Authenticate all security-relevant metadata.
         aad = self._build_aad(
             policy_str,
             key_id,
@@ -274,8 +234,6 @@ class CpAbeCipherEngine:
             aad,
         )
 
-        # Envelope:
-        # nonce (12 bytes) + ciphertext + authentication tag
         encrypted = nonce + ciphertext
 
         return {
@@ -304,28 +262,17 @@ class CpAbeCipherEngine:
     ) -> bytes:
 
         if not isinstance(ciphertext_b64, str):
-            raise TypeError(
-                "Ciphertext must be a string."
-            )
+            raise TypeError("Ciphertext must be a string.")
 
         policy_str = self._validate_policy(policy_str)
-
-        user_attributes = self._validate_attributes(
-            user_attributes
-        )
-
-        document_id = self._validate_document_id(
-            document_id
-        )
-
+        user_attributes = self._validate_attributes(user_attributes)
+        document_id = self._validate_document_id(document_id)
         key_id = self._validate_key_id(key_id)
 
-        if version != ENVELOPE_VERSION:
-            raise ValueError(
-                "Unsupported encryption envelope version."
-            )
+        if type(version) is not int or version != ENVELOPE_VERSION:
+            raise ValueError("Unsupported encryption envelope version.")
 
-        # Reject oversized encoded input before decoding.
+        # Check encoded input size before decoding.
         max_encoded_size = 4 * (
             (NONCE_SIZE + TAG_SIZE + MAX_CIPHERTEXT_SIZE + 2) // 3
         )
@@ -339,14 +286,10 @@ class CpAbeCipherEngine:
                 validate=True,
             )
         except (ValueError, TypeError, binascii.Error):
-            raise ValueError(
-                "Invalid Base64 ciphertext."
-            ) from None
+            raise ValueError("Invalid Base64 ciphertext.") from None
 
         if len(encrypted) < NONCE_SIZE + TAG_SIZE:
-            raise ValueError(
-                "Ciphertext is too short."
-            )
+            raise ValueError("Ciphertext is too short.")
 
         if len(encrypted) > (
             NONCE_SIZE + TAG_SIZE + MAX_CIPHERTEXT_SIZE
@@ -365,7 +308,6 @@ class CpAbeCipherEngine:
                 )
             )
         except Exception:
-            # Log the original exception internally.
             raise ValueError(
                 "Unable to evaluate access policy."
             ) from None
@@ -403,8 +345,7 @@ class CpAbeCipherEngine:
 
         except InvalidTag:
             raise ValueError(
-                "Decryption failed: authentication "
-                "verification failed."
+                "Decryption failed: authentication verification failed."
             ) from None
 
 
